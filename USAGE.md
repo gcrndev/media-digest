@@ -212,3 +212,4 @@ The local script:
 - YouTube is the primary supported platform.
 - Instagram Reels are best effort and may need cookies.
 - If Instagram fails, export browser cookies and set `MEDIA_DIGEST_YTDLP_COOKIES`.
+- Portuguese and English videos are supported. Keep `MEDIA_DIGEST_TRANSCRIPTION_LANGUAGE=` empty in `media-sync.env` to let Whisper auto-detect the language.

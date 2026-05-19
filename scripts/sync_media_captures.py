@@ -254,7 +254,7 @@ class FasterWhisperTranscriber:
             raise RuntimeError("Missing faster-whisper. Install it with: pip install -r requirements-transcribe.txt") from exc
 
         self.model_name = config.get("MEDIA_DIGEST_WHISPER_MODEL", "small")
-        self.language = empty_to_none(config.get("MEDIA_DIGEST_TRANSCRIPTION_LANGUAGE", "pt"))
+        self.language = empty_to_none(config.get("MEDIA_DIGEST_TRANSCRIPTION_LANGUAGE"))
         device = config.get("MEDIA_DIGEST_WHISPER_DEVICE", "cpu")
         compute_type = config.get("MEDIA_DIGEST_WHISPER_COMPUTE_TYPE", "int8")
         log(f"Loading faster-whisper model={self.model_name} device={device} compute_type={compute_type}")
