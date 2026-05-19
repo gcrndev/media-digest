@@ -104,12 +104,13 @@ def process_synced_media(
         print("No synced media pending processing.")
         return 0
 
-    print(f"Synced media pending processing: {len(pending)}")
+    log(f"Synced media pending processing: {len(pending)}")
     transcriber = None if dry_run else FasterWhisperTranscriber(config)
 
     for capture_id, capture in pending:
         created_at = parse_iso(capture["created_at"])
         artifacts_dir = vault_root / artifacts_relative_dir(created_at, capture_id)
+        log(f"Start {capture_id}: {capture['url']}")
 
         if dry_run:
             print(f"Would process {capture_id}: {capture['url']}")
@@ -117,15 +118,21 @@ def process_synced_media(
             continue
 
         try:
+            log("Status -> extracting")
             client.json_request("POST", f"/api/media/{capture_id}/status", {"status": "extracting"})
             artifacts_dir.mkdir(parents=True, exist_ok=True)
             extracted = extract_media(config, capture["url"], artifacts_dir, capture_id)
+            duration = format_duration(extracted.duration_seconds)
+            log(f"Extracted audio: {extracted.audio_path.name} | title={extracted.title!r} | duration={duration}")
 
+            log("Status -> transcribing")
             client.json_request("POST", f"/api/media/{capture_id}/status", {"status": "transcribing"})
-            transcript = transcriber.transcribe(extracted.audio_path)
+            transcript = transcriber.transcribe(extracted.audio_path, duration_seconds=extracted.duration_seconds)
             transcript_path = artifacts_dir / f"{capture_id}.transcript.json"
             transcript_path.write_text(json.dumps(transcript.to_dict(), indent=2) + "\n", encoding="utf-8")
+            log(f"Transcript saved: {transcript_path}")
 
+            log("Status -> summarizing")
             client.json_request("POST", f"/api/media/{capture_id}/status", {"status": "summarizing"})
             note_path = vault_root / note_relative_path(created_at, extracted.title, capture_id)
             write_media_note(
@@ -137,6 +144,7 @@ def process_synced_media(
                 transcript=transcript,
                 artifacts_dir=artifacts_dir.relative_to(vault_root),
             )
+            log(f"Note written: {note_path}")
 
             capture["note_file"] = str(note_path.relative_to(vault_root)).replace("\\", "/")
             capture["artifacts_dir"] = str(artifacts_dir.relative_to(vault_root)).replace("\\", "/")
@@ -148,7 +156,7 @@ def process_synced_media(
                 f"/api/media/{capture_id}/status",
                 {"status": "saved", "message": f"Created {capture['note_file']}"},
             )
-            print(f"Processed {capture_id} -> {note_path}")
+            log(f"Done {capture_id} -> {note_path}")
         except Exception as exc:
             capture["remote_status"] = "failed"
             capture["error"] = str(exc)
@@ -158,7 +166,7 @@ def process_synced_media(
                 f"/api/media/{capture_id}/status",
                 {"status": "failed", "message": str(exc)},
             )
-            print(f"Failed {capture_id}: {exc}", file=sys.stderr)
+            log(f"Failed {capture_id}: {exc}", stream=sys.stderr)
 
     return 0
 
@@ -249,17 +257,30 @@ class FasterWhisperTranscriber:
         self.language = empty_to_none(config.get("MEDIA_DIGEST_TRANSCRIPTION_LANGUAGE", "pt"))
         device = config.get("MEDIA_DIGEST_WHISPER_DEVICE", "cpu")
         compute_type = config.get("MEDIA_DIGEST_WHISPER_COMPUTE_TYPE", "int8")
+        log(f"Loading faster-whisper model={self.model_name} device={device} compute_type={compute_type}")
         self.model = WhisperModel(self.model_name, device=device, compute_type=compute_type)
+        log("Whisper model ready")
 
-    def transcribe(self, audio_path: pathlib.Path) -> TranscriptionResult:
+    def transcribe(self, audio_path: pathlib.Path, duration_seconds: int | None = None) -> TranscriptionResult:
+        log(f"Transcription started: {audio_path}")
         segments_iter, _info = self.model.transcribe(str(audio_path), language=self.language)
-        segments = [
-            {"start": segment.start, "end": segment.end, "text": segment.text.strip()}
-            for segment in segments_iter
-            if segment.text.strip()
-        ]
+        segments = []
+        last_progress = -1
+        for segment in segments_iter:
+            text = segment.text.strip()
+            if not text:
+                continue
+            segments.append({"start": segment.start, "end": segment.end, "text": text})
+            if duration_seconds:
+                progress = min(100, int((segment.end / duration_seconds) * 100))
+                if progress >= last_progress + 5:
+                    log(f"Transcribing... {progress}% ({format_timestamp(segment.end)} / {format_duration(duration_seconds)})")
+                    last_progress = progress
+            elif len(segments) % 25 == 0:
+                log(f"Transcribing... {len(segments)} segments ({format_timestamp(segment.end)})")
         text = "\n".join(segment["text"] for segment in segments)
         confidence = "medium" if text else "low"
+        log(f"Transcription finished: {len(segments)} segments")
         return TranscriptionResult(
             text=text or "_No speech detected._",
             segments=segments,
@@ -289,7 +310,9 @@ def extract_media(config: dict[str, str], url: str, output_dir: pathlib.Path, ca
     if cookies:
         command[1:1] = ["--cookies", cookies]
 
+    log("yt-dlp started")
     subprocess.run(command, check=True)
+    log("yt-dlp finished")
 
     info_path = output_dir / f"{capture_id}.info.json"
     info = json.loads(info_path.read_text(encoding="utf-8")) if info_path.exists() else {}
@@ -490,6 +513,11 @@ def parse_iso(value: str) -> dt.datetime:
 
 def utc_now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def log(message: str, stream = sys.stdout) -> None:
+    timestamp = dt.datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] {message}", file=stream, flush=True)
 
 
 if __name__ == "__main__":
