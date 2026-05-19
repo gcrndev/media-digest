@@ -5,7 +5,7 @@
 1. Open YouTube or Instagram.
 2. Tap Share.
 3. Run the Shortcut "Salvar no Media Digest".
-4. The Shortcut sends the URL to `/api/media/capture-token`.
+4. The Shortcut sends the URL to `https://media-digest.gcrndev.workers.dev/api/media/capture-token`.
 
 ## Process Locally
 

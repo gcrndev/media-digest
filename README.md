@@ -23,6 +23,12 @@ npm install
 python -m pip install -r requirements-transcribe.txt
 ```
 
+Worker URL:
+
+```text
+https://media-digest.gcrndev.workers.dev
+```
+
 Create a Cloudflare KV namespace:
 
 ```powershell
@@ -56,7 +62,7 @@ npx wrangler secret put CAPTURE_TOKEN
 Use the simpler capture-token endpoint first:
 
 ```http
-POST https://<worker-url>/api/media/capture-token
+POST https://media-digest.gcrndev.workers.dev/api/media/capture-token
 Authorization: Bearer <CAPTURE_TOKEN>
 Content-Type: application/json
 ```
