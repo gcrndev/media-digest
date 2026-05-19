@@ -59,6 +59,8 @@ npx wrangler secret put CAPTURE_TOKEN
 
 ## iOS Shortcut MVP
 
+Full setup guide: [USAGE.md](USAGE.md).
+
 Use the simpler capture-token endpoint first:
 
 ```http
