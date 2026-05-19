@@ -1,0 +1,11 @@
+node_modules/
+.wrangler/
+.dev.vars
+dist/
+*.log
+pairing-token.local.txt
+media-sync.env
+media-sync.env.local
+sync-manifest.json
+__pycache__/
+*.pyc
