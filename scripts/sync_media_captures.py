@@ -270,6 +270,7 @@ class FasterWhisperTranscriber:
 
 def extract_media(config: dict[str, str], url: str, output_dir: pathlib.Path, capture_id: str) -> ExtractedMedia:
     ytdlp = config.get("MEDIA_DIGEST_YTDLP", "yt-dlp")
+    ffmpeg = resolve_ffmpeg(config)
     output_template = str(output_dir / f"{capture_id}.%(ext)s")
     command = [
         ytdlp,
@@ -282,6 +283,8 @@ def extract_media(config: dict[str, str], url: str, output_dir: pathlib.Path, ca
         output_template,
         url,
     ]
+    if ffmpeg:
+        command[1:1] = ["--ffmpeg-location", ffmpeg]
     cookies = empty_to_none(config.get("MEDIA_DIGEST_YTDLP_COOKIES"))
     if cookies:
         command[1:1] = ["--cookies", cookies]
@@ -303,6 +306,17 @@ def extract_media(config: dict[str, str], url: str, output_dir: pathlib.Path, ca
         audio_path=audio_path,
         info_path=info_path,
     )
+
+
+def resolve_ffmpeg(config: dict[str, str]) -> str | None:
+    configured = empty_to_none(config.get("MEDIA_DIGEST_FFMPEG"))
+    if configured and configured != "ffmpeg":
+        return configured
+    try:
+        import imageio_ffmpeg
+    except ImportError:
+        return configured
+    return imageio_ffmpeg.get_ffmpeg_exe()
 
 
 def write_media_note(
