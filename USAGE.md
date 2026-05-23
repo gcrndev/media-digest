@@ -149,6 +149,12 @@ To process fully:
 python scripts\sync_media_captures.py --all
 ```
 
+To process a one-off link already sitting in the vault or clipboard:
+
+```powershell
+python scripts\sync_media_captures.py --url "https://www.instagram.com/reel/..."
+```
+
 ## Troubleshooting iOS
 
 ### Shortcut does not appear in Share Sheet
@@ -204,8 +210,10 @@ The local script:
 1. Fetches pending links from Cloudflare.
 2. Extracts audio with `yt-dlp`.
 3. Transcribes with `faster-whisper`.
-4. Creates one `media-capture` note in `00-Inbox`.
-5. Marks the remote item as `saved` or `failed`.
+4. Analyzes the transcript locally into summary, key ideas, useful details,
+   critical notes, follow-up actions, and revisit questions.
+5. Creates one `media-capture` note in `00-Inbox`.
+6. Marks the remote item as `saved` or `failed`.
 
 ## Notes
 

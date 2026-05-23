@@ -11,6 +11,7 @@ iOS Share Sheet
   -> local PC sync
   -> yt-dlp + ffmpeg
   -> faster-whisper
+  -> local transcript analysis
   -> 00-Inbox media-capture note
 ```
 
@@ -117,6 +118,12 @@ Sync and process:
 python scripts\sync_media_captures.py --all
 ```
 
+Process a one-off URL without using the iPhone/Worker queue:
+
+```powershell
+python scripts\sync_media_captures.py --url "https://www.instagram.com/reel/..."
+```
+
 Generated notes land in:
 
 ```text
@@ -128,3 +135,6 @@ Artifacts land in:
 ```text
 C:\repositories\secondbrain\Meta\media-captures
 ```
+
+The generated note includes an executive summary, key ideas, useful details,
+critical analysis, follow-up actions, and the full timestamped transcript.

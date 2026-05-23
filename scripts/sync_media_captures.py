@@ -29,6 +29,12 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="List pending captures without processing.")
     parser.add_argument("--process", action="store_true", help="Extract, transcribe, and create notes.")
     parser.add_argument("--all", action="store_true", help="Sync pending captures, then process synced captures.")
+    parser.add_argument("--url", help="Process one media URL locally without calling the Worker.")
+    parser.add_argument(
+        "--reanalyze-vault-notes",
+        action="store_true",
+        help="Fill analysis sections in existing vault media-capture notes.",
+    )
     args = parser.parse_args()
 
     config = load_config(pathlib.Path(args.config))
@@ -40,6 +46,12 @@ def main() -> int:
     manifest = load_manifest()
     client = SignedClient(base_url, device_id, device_secret)
 
+    if args.reanalyze_vault_notes:
+        return reanalyze_vault_notes(vault_root, dry_run=args.dry_run)
+
+    if args.url:
+        return process_local_url(config, vault_root, manifest, args.url, args.dry_run)
+
     if args.all:
         sync_result = sync_pending_media(manifest, client, args.dry_run)
         if sync_result != 0:
@@ -50,6 +62,131 @@ def main() -> int:
         return process_synced_media(config, vault_root, manifest, client, args.dry_run)
 
     return sync_pending_media(manifest, client, args.dry_run)
+
+
+def process_local_url(
+    config: dict[str, str],
+    vault_root: pathlib.Path,
+    manifest: dict,
+    url: str,
+    dry_run: bool,
+) -> int:
+    created_at = dt.datetime.now(dt.timezone.utc)
+    capture_id = created_at.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
+    platform = detect_platform(url)
+
+    if dry_run:
+        artifacts_dir = vault_root / artifacts_relative_dir(created_at, capture_id)
+        print(f"Would process local URL {capture_id}: {url}")
+        print(f"Would write artifacts under {artifacts_dir}")
+        return 0
+
+    manifest.setdefault("synced_ids", []).append(capture_id)
+    manifest.setdefault("captures", {})[capture_id] = {
+        "id": capture_id,
+        "url": url,
+        "platform": platform,
+        "source": "manual-url",
+        "created_at": created_at.isoformat().replace("+00:00", "Z"),
+        "remote_status": "synced",
+        "synced_at": utc_now(),
+    }
+    save_manifest(manifest)
+    return process_synced_media(config, vault_root, manifest, NoopClient(), dry_run=False)
+
+
+def reanalyze_vault_notes(vault_root: pathlib.Path, dry_run: bool) -> int:
+    candidates = list(vault_root.glob("00-Inbox/*media-capture*.md"))
+    candidates += list((vault_root / "04-Archive" / "Inbox Sources").glob("**/*media-capture*.md"))
+
+    updated = 0
+    for note_path in candidates:
+        content = note_path.read_text(encoding="utf-8")
+        if "type: media-capture" not in content:
+            continue
+        if "_Pending review._" not in content and "## Analysis\n" in content:
+            continue
+
+        transcript = extract_transcript_from_note(content)
+        title = extract_note_title(content, note_path)
+        if not transcript.strip():
+            print(f"Skip no transcript: {note_path}")
+            continue
+
+        analysis = analyze_media(transcript, title)
+        new_content = replace_analysis_sections(content, analysis)
+        if new_content == content:
+            continue
+
+        if dry_run:
+            print(f"Would reanalyze {note_path}")
+            continue
+
+        note_path.write_text(new_content, encoding="utf-8")
+        print(f"Reanalyzed {note_path}")
+        updated += 1
+
+    print(f"Reanalyzed notes: {updated}")
+    return 0
+
+
+def extract_transcript_from_note(content: str) -> str:
+    match = re.search(r"(?ms)^## Transcript\s*\n(.*)$", content)
+    if not match:
+        return ""
+    transcript = match.group(1)
+    lines = []
+    for line in transcript.splitlines():
+        cleaned = re.sub(r"^- \[[^\]]+\]\s*", "", line).strip()
+        if cleaned:
+            lines.append(cleaned)
+    return " ".join(lines)
+
+
+def extract_note_title(content: str, note_path: pathlib.Path) -> str:
+    match = re.search(r"(?m)^#\s+(.+)$", content)
+    if match:
+        return match.group(1).strip()
+    return note_path.stem
+
+
+def replace_analysis_sections(content: str, analysis: "MediaAnalysis") -> str:
+    updated = replace_section(content, "Executive Summary", analysis.summary)
+    updated = replace_section(updated, "Key Ideas", format_bullets(analysis.key_ideas))
+    updated = replace_section(updated, "Useful Details", format_bullets(analysis.useful_details))
+    updated = ensure_section_before(
+        updated,
+        heading="Analysis",
+        body=format_bullets(analysis.critical_analysis),
+        before_heading="Action Items / Follow-ups",
+    )
+    updated = replace_section(updated, "Action Items / Follow-ups", format_tasks(analysis.action_items))
+    updated = ensure_section_before(
+        updated,
+        heading="Questions To Revisit",
+        body=format_bullets(analysis.follow_up_questions),
+        before_heading="Transcript",
+    )
+    return updated
+
+
+def replace_section(content: str, heading: str, body: str) -> str:
+    pattern = rf"(?ms)^## {re.escape(heading)}\s*\n.*?(?=^## |\Z)"
+    replacement = f"## {heading}\n\n{body.strip()}\n\n"
+    if re.search(pattern, content):
+        return re.sub(pattern, replacement, content, count=1)
+    return content.rstrip() + "\n\n" + replacement
+
+
+def ensure_section_before(content: str, heading: str, body: str, before_heading: str) -> str:
+    if re.search(rf"(?m)^## {re.escape(heading)}\s*$", content):
+        return replace_section(content, heading, body)
+    marker = f"## {before_heading}"
+    section = f"## {heading}\n\n{body.strip()}\n\n"
+    index = content.find(marker)
+    if index == -1:
+        return content.rstrip() + "\n\n" + section
+    return content[:index] + section + content[index:]
 
 
 def sync_pending_media(manifest: dict, client: "SignedClient", dry_run: bool) -> int:
@@ -214,6 +351,11 @@ class SignedClient:
             raise RuntimeError(f"HTTP {error.code} {path}: {detail}") from error
 
 
+class NoopClient:
+    def json_request(self, method: str, path: str, payload: dict | None = None) -> dict:
+        return {"ok": True}
+
+
 class ExtractedMedia:
     def __init__(
         self,
@@ -244,6 +386,24 @@ class TranscriptionResult:
             "engine": self.engine,
             "confidence": self.confidence,
         }
+
+
+class MediaAnalysis:
+    def __init__(
+        self,
+        summary: str,
+        key_ideas: list[str],
+        useful_details: list[str],
+        action_items: list[str],
+        critical_analysis: list[str],
+        follow_up_questions: list[str],
+    ) -> None:
+        self.summary = summary
+        self.key_ideas = key_ideas
+        self.useful_details = useful_details
+        self.action_items = action_items
+        self.critical_analysis = critical_analysis
+        self.follow_up_questions = follow_up_questions
 
 
 class FasterWhisperTranscriber:
@@ -357,7 +517,7 @@ def write_media_note(
     note_path.parent.mkdir(parents=True, exist_ok=True)
     created = created_at.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
     transcript_text = format_segments(transcript)
-    summary = rough_summary(transcript.text)
+    analysis = analyze_media(transcript.text, extracted.title)
     artifact_path = str(artifacts_dir).replace("\\", "/")
     safe_title = yaml_escape(extracted.title)
     safe_creator = yaml_escape(extracted.creator)
@@ -389,19 +549,27 @@ artifacts_dir: {artifact_path}
 
 ## Executive Summary
 
-{summary}
+{analysis.summary}
 
 ## Key Ideas
 
-_Pending review._
+{format_bullets(analysis.key_ideas)}
 
 ## Useful Details
 
-_Pending review._
+{format_bullets(analysis.useful_details)}
+
+## Analysis
+
+{format_bullets(analysis.critical_analysis)}
 
 ## Action Items / Follow-ups
 
-_Pending review._
+{format_tasks(analysis.action_items)}
+
+## Questions To Revisit
+
+{format_bullets(analysis.follow_up_questions)}
 
 ## Transcript
 
@@ -427,6 +595,188 @@ def rough_summary(text: str) -> str:
     return " ".join(sentences[:4]).strip()
 
 
+def analyze_media(text: str, title: str) -> MediaAnalysis:
+    cleaned = " ".join(text.split())
+    if not cleaned or cleaned == "_No speech detected._":
+        return MediaAnalysis(
+            summary="_No speech detected._",
+            key_ideas=["Audio sem fala detectada."],
+            useful_details=[],
+            action_items=["Reprocessar a captura se o audio deveria ter fala."],
+            critical_analysis=["Nao ha conteudo suficiente para avaliar."],
+            follow_up_questions=["O video tinha fala audivel ou era apenas visual/musical?"],
+        )
+
+    sentences = split_sentences(cleaned)
+    scored = score_sentences(sentences, title)
+    top = [sentence for _score, sentence in scored[:8]]
+    summary_sentences = top[:4] if top else sentences[:4]
+    summary = " ".join(summary_sentences).strip()
+
+    key_ideas = compact_items(top[:5] or sentences[:5])
+    useful_details = compact_items(select_detail_sentences(sentences))
+    action_items = infer_action_items(sentences, title)
+    critical_analysis = infer_critical_analysis(sentences, title)
+    follow_up_questions = infer_follow_up_questions(sentences, title)
+
+    return MediaAnalysis(
+        summary=summary,
+        key_ideas=key_ideas,
+        useful_details=useful_details,
+        action_items=action_items,
+        critical_analysis=critical_analysis,
+        follow_up_questions=follow_up_questions,
+    )
+
+
+def split_sentences(text: str) -> list[str]:
+    parts = re.split(r"(?<=[.!?])\s+|\n+", text)
+    sentences = []
+    for part in parts:
+        sentence = part.strip(" -\t")
+        if len(sentence) >= 20:
+            sentences.append(sentence)
+    return sentences
+
+
+def score_sentences(sentences: list[str], title: str) -> list[tuple[int, str]]:
+    keywords = {
+        "idea": 5,
+        "ideia": 5,
+        "framework": 4,
+        "strategy": 4,
+        "estrategia": 4,
+        "problem": 4,
+        "problema": 4,
+        "because": 3,
+        "porque": 3,
+        "how": 3,
+        "como": 3,
+        "should": 3,
+        "deveria": 3,
+        "important": 3,
+        "importante": 3,
+        "example": 2,
+        "exemplo": 2,
+        "tool": 2,
+        "ferramenta": 2,
+        "business": 2,
+        "negocio": 2,
+        "product": 2,
+        "produto": 2,
+        "money": 2,
+        "dinheiro": 2,
+        "learn": 2,
+        "aprender": 2,
+    }
+    title_terms = {term.lower() for term in re.findall(r"[a-zA-Z0-9]{4,}", title)}
+    scored = []
+    for index, sentence in enumerate(sentences):
+        lower = sentence.lower()
+        score = max(0, 8 - index)
+        score += sum(weight for keyword, weight in keywords.items() if keyword in lower)
+        score += sum(2 for term in title_terms if term in lower)
+        score += min(4, len(re.findall(r"\d+%?|\$|€", sentence)))
+        scored.append((score, sentence))
+    return sorted(scored, key=lambda item: item[0], reverse=True)
+
+
+def select_detail_sentences(sentences: list[str]) -> list[str]:
+    detail_markers = [
+        r"\d+%?",
+        r"\$|€",
+        r"github",
+        r"http",
+        r"compared",
+        r"comparad",
+        r"example",
+        r"exemplo",
+        r"step",
+        r"passo",
+        r"tool",
+        r"ferramenta",
+    ]
+    details = []
+    for sentence in sentences:
+        lower = sentence.lower()
+        if any(re.search(marker, lower) for marker in detail_markers):
+            details.append(sentence)
+    return details[:6]
+
+
+def infer_action_items(sentences: list[str], title: str) -> list[str]:
+    text = " ".join(sentences).lower()
+    actions = []
+    if any(word in text for word in ["tool", "ferramenta", "github", "browser", "app", "framework"]):
+        actions.append(f"Verificar a fonte oficial mencionada em \"{title}\" antes de adotar a recomendacao.")
+    if any(word in text for word in ["business", "negocio", "money", "dinheiro", "rich", "rico"]):
+        actions.append("Extrair principios praticos e comparar com os projetos/negocios ativos.")
+    if any(word in text for word in ["learn", "aprender", "skill", "habilidade"]):
+        actions.append("Transformar os aprendizados aplicaveis em uma nota de estudo ou tarefa.")
+    if any(word in text for word in ["comment", "follow", "link", "send", "comenta", "segue"]):
+        actions.append("Separar chamada de marketing do conteudo realmente util.")
+    if not actions:
+        actions.append("Revisar a nota e decidir se vira referencia, tarefa ou descarte.")
+    return actions
+
+
+def infer_critical_analysis(sentences: list[str], title: str) -> list[str]:
+    text = " ".join(sentences).lower()
+    analysis = []
+    if any(word in text for word in ["claims", "claim", "promete", "promessa", "reduces", "reduz"]):
+        analysis.append("Ha uma promessa central no conteudo; ela precisa ser validada antes de virar decisao.")
+    if any(word in text for word in ["github", "stars", "followers", "seguidores"]):
+        analysis.append("Popularidade e prova social aparecem como argumento, mas nao substituem teste pratico.")
+    if any(word in text for word in ["compared", "comparad", "versus", "vs"]):
+        analysis.append("O conteudo compara alternativas; vale checar se a comparacao usa criterios relevantes para seu uso real.")
+    if any(word in text for word in ["buy", "comprar", "course", "curso", "comment", "follow"]):
+        analysis.append("Pode haver incentivo comercial ou chamada de engajamento misturada com informacao.")
+    if not analysis:
+        analysis.append("Analise gerada localmente a partir da transcricao; revise nuances visuais que nao aparecem no audio.")
+    return analysis
+
+
+def infer_follow_up_questions(sentences: list[str], title: str) -> list[str]:
+    text = " ".join(sentences).lower()
+    questions = []
+    if any(word in text for word in ["tool", "ferramenta", "browser", "framework", "app"]):
+        questions.append("Isso resolve um problema real dos seus projetos atuais ou e apenas interessante?")
+    if any(word in text for word in ["business", "negocio", "money", "dinheiro", "rich", "rico"]):
+        questions.append("Qual principio pode ser testado esta semana em GAMI, Raiz Lusitana ou outro projeto?")
+    if any(word in text for word in ["claim", "promete", "reduces", "reduz", "stars"]):
+        questions.append("Qual evidencia externa confirmaria a promessa principal?")
+    if not questions:
+        questions.append("Por que este conteudo mereceu ser salvo?")
+    return questions
+
+
+def compact_items(items: list[str]) -> list[str]:
+    compacted = []
+    seen = set()
+    for item in items:
+        clean = " ".join(item.split()).strip()
+        if not clean:
+            continue
+        key = clean.lower()[:90]
+        if key in seen:
+            continue
+        seen.add(key)
+        compacted.append(clean)
+    return compacted[:6]
+
+
+def format_bullets(items: list[str]) -> str:
+    if not items:
+        return "- _Nenhum item claro extraido._"
+    return "\n".join(f"- {item}" for item in items)
+
+
+def format_tasks(items: list[str]) -> str:
+    if not items:
+        return "- [ ] Revisar captura."
+    return "\n".join(f"- [ ] {item}" for item in items)
+
+
 def artifacts_relative_dir(created_at: dt.datetime, capture_id: str) -> pathlib.Path:
     return pathlib.Path(
         "Meta",
@@ -446,6 +796,15 @@ def note_relative_path(created_at: dt.datetime, title: str, capture_id: str) -> 
 def slugify(value: str) -> str:
     value = re.sub(r"[^a-zA-Z0-9]+", "-", value.lower()).strip("-")
     return value[:70].strip("-")
+
+
+def detect_platform(url: str) -> str:
+    lowered = url.lower()
+    if "instagram.com" in lowered:
+        return "instagram"
+    if "youtu.be" in lowered or "youtube.com" in lowered:
+        return "youtube"
+    return "unknown"
 
 
 def format_duration(seconds: int | None) -> str:
